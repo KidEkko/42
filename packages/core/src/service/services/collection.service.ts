@@ -591,14 +591,6 @@ export class CollectionService implements OnModuleInit {
         return filters;
     }
 
-    private chunkArray = <T>(array: T[], chunkSize: number): T[][] => {
-        const results = [];
-        for (let i = 0; i < array.length; i += chunkSize) {
-            results.push(array.slice(i, i + chunkSize));
-        }
-
-        return results;
-    };
 
     /**
      * Applies the CollectionFilters
@@ -613,48 +605,61 @@ export class CollectionService implements OnModuleInit {
         applyToChangedVariantsOnly = true,
     ): Promise<ID[]> {
         const ancestorFilters = await this.getAncestorFilters(collection);
-        const preIds = await this.getCollectionProductVariantIds(collection);
-        const filteredVariantIds = await this.getFilteredProductVariantIds([
-            ...ancestorFilters,
-            ...(collection.filters || []),
-        ]);
-        const postIds = filteredVariantIds.map(v => v.id);
-        const preIdsSet = new Set(preIds);
-        const postIdsSet = new Set(postIds);
-
-        const toDeleteIds = preIds.filter(id => !postIdsSet.has(id));
-        const toAddIds = postIds.filter(id => !preIdsSet.has(id));
+        const filters = [...ancestorFilters, ...(collection.filters || [])];
 
         try {
-            // First we remove variants that are no longer in the collection
-            const chunkedDeleteIds = this.chunkArray(toDeleteIds, 500);
+            const preIds = await this.getCollectionProductVariantIds(collection);
+            const filteredVariantIds = filters.length 
+                ? await this.getFilteredProductVariantIds(filters)
+                : [];
+            const postIds = filteredVariantIds.map(v => v.id);
 
-            for (const chunkedDeleteId of chunkedDeleteIds) {
-                await this.connection.rawConnection
-                    .createQueryBuilder()
-                    .relation(Collection, 'productVariants')
-                    .of(collection)
-                    .remove(chunkedDeleteId);
+            if ((filters.length === 0 || postIds.length === 0) && preIds.length === 0) {
+                return [];
             }
 
-            // Then we add variants have been added
-            const chunkedAddIds = this.chunkArray(toAddIds, 500);
+            const preIdsSet = new Set(preIds);
+            const postIdsSet = new Set(postIds);
 
-            for (const chunkedAddId of chunkedAddIds) {
-                await this.connection.rawConnection
-                    .createQueryBuilder()
-                    .relation(Collection, 'productVariants')
-                    .of(collection)
-                    .add(chunkedAddId);
+            const toDeleteIds = preIds.filter(id => !postIdsSet.has(id));
+            
+            const toAddIds = postIds.filter(id => !preIdsSet.has(id));
+
+            if (toDeleteIds.length === 0 && toAddIds.length === 0) {
+                return [];
+            }
+
+            await this.connection.withTransaction(async transactionalConnection => {
+                // Remove variants that are no longer in the collection
+                if (toDeleteIds.length > 0) {
+                    await transactionalConnection.rawConnection
+                        .createQueryBuilder()
+                        .relation(Collection, 'productVariants')
+                        .of(collection)
+                        .remove(toDeleteIds);
+                }
+
+                // Add variants that have been added
+                if (toAddIds.length > 0) {
+                    await transactionalConnection.rawConnection
+                        .createQueryBuilder()
+                        .relation(Collection, 'productVariants')
+                        .of(collection)
+                        .add(toAddIds);
+                }
+            });
+
+            if (applyToChangedVariantsOnly) {
+                return [...toDeleteIds, ...toAddIds];
+            } else {
+                return [...toDeleteIds, ...postIds];
             }
         } catch (e: any) {
-            Logger.error(e);
-        }
-
-        if (applyToChangedVariantsOnly) {
-            return [...preIds.filter(id => !postIdsSet.has(id)), ...postIds.filter(id => !preIdsSet.has(id))];
-        } else {
-            return [...preIds.filter(id => !postIdsSet.has(id)), ...postIds];
+            Logger.error(
+                `Error applying filters to collection "${collection.name}" (${String(collection.id)}): ${String(e.message)}`,
+                e.stack,
+            );
+            return [];
         }
     }
 
@@ -683,10 +688,13 @@ export class CollectionService implements OnModuleInit {
         if (filters.length === 0) {
             return [];
         }
+        
         const { collectionFilters } = this.configService.catalogOptions;
         let qb = this.connection.rawConnection
             .getRepository(ProductVariant)
-            .createQueryBuilder('productVariant');
+            .createQueryBuilder('productVariant')
+            .select('productVariant.id', 'id')
+            .where('productVariant.deletedAt IS NULL');
 
         for (const filterType of collectionFilters) {
             const filtersOfType = filters.filter(f => f.code === filterType.code);
@@ -697,9 +705,7 @@ export class CollectionService implements OnModuleInit {
             }
         }
 
-        // This is the most performant (time & memory) way to get
-        // just the variant IDs, which is all we need.
-        return qb.select('productVariant.id', 'id').getRawMany();
+        return qb.getRawMany();
     }
 
     /**
