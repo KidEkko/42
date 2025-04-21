@@ -126,7 +126,7 @@ export class CollectionService implements OnModuleInit {
                             retryDelay: 50,
                         });
                     } catch (err: any) {
-                        Logger.warn(`Could not find Collection with id ${collectionId}, skipping`);
+                        Logger.warn(`Could not find Collection with id ${String(collectionId)}, skipping`);
                     }
                     completed++;
                     if (collection) {
@@ -140,7 +140,7 @@ export class CollectionService implements OnModuleInit {
                             const translatedCollection = this.translator.translate(collection, ctx);
                             Logger.error(
                                 'An error occurred when processing the filters for ' +
-                                    `the collection "${translatedCollection.name}" (id: ${collection.id})`,
+                                    `the collection "${translatedCollection.name}" (id: ${String(collection.id)})`,
                             );
                             Logger.error(e.message);
                             continue;
